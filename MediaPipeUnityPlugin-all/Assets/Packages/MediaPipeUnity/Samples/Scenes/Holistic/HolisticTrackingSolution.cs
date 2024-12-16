@@ -6,10 +6,11 @@
 
 using System.Collections;
 using UnityEngine;
+using UnityEngine.Rendering;
 
-namespace Mediapipe.Unity.Holistic
+namespace Mediapipe.Unity.Sample.Holistic
 {
-  public class HolisticTrackingSolution : ImageSourceSolution<HolisticTrackingGraph>
+  public class HolisticTrackingSolution : LegacySolutionRunner<HolisticTrackingGraph>
   {
     [SerializeField] private RectTransform _worldAnnotationArea;
     [SerializeField] private DetectionAnnotationController _poseDetectionAnnotationController;
@@ -17,6 +18,8 @@ namespace Mediapipe.Unity.Holistic
     [SerializeField] private PoseWorldLandmarkListAnnotationController _poseWorldLandmarksAnnotationController;
     [SerializeField] private MaskAnnotationController _segmentationMaskAnnotationController;
     [SerializeField] private NormalizedRectAnnotationController _poseRoiAnnotationController;
+
+    private Experimental.TextureFramePool _textureFramePool;
 
     public HolisticTrackingGraph.ModelComplexity modelComplexity
     {
@@ -60,14 +63,34 @@ namespace Mediapipe.Unity.Holistic
       set => graphRunner.minTrackingConfidence = value;
     }
 
-    protected override void SetupScreen(ImageSource imageSource)
+    protected override IEnumerator Run()
     {
-      base.SetupScreen(imageSource);
-      _worldAnnotationArea.localEulerAngles = imageSource.rotation.Reverse().GetEulerAngles();
-    }
+      var graphInitRequest = graphRunner.WaitForInit(runningMode);
+      var imageSource = ImageSourceProvider.ImageSource;
 
-    protected override void OnStartRun()
-    {
+      yield return imageSource.Play();
+
+      if (!imageSource.isPrepared)
+      {
+        Debug.LogError("Failed to start ImageSource, exiting...");
+        yield break;
+      }
+
+      // Use RGBA32 as the input format.
+      // TODO: When using GpuBuffer, MediaPipe assumes that the input format is BGRA, so the following code must be fixed.
+      _textureFramePool = new Experimental.TextureFramePool(imageSource.textureWidth, imageSource.textureHeight, TextureFormat.RGBA32, 10);
+
+      // NOTE: The screen will be resized later, keeping the aspect ratio.
+      screen.Initialize(imageSource);
+      _worldAnnotationArea.localEulerAngles = imageSource.rotation.Reverse().GetEulerAngles();
+
+      yield return graphInitRequest;
+      if (graphInitRequest.isError)
+      {
+        Debug.LogError(graphInitRequest.error);
+        yield break;
+      }
+
       if (!runningMode.IsSynchronous())
       {
         graphRunner.OnPoseDetectionOutput += OnPoseDetectionOutput;
@@ -80,86 +103,129 @@ namespace Mediapipe.Unity.Holistic
         graphRunner.OnPoseRoiOutput += OnPoseRoiOutput;
       }
 
-      var imageSource = ImageSourceProvider.ImageSource;
       SetupAnnotationController(_poseDetectionAnnotationController, imageSource);
       SetupAnnotationController(_holisticAnnotationController, imageSource);
       SetupAnnotationController(_poseWorldLandmarksAnnotationController, imageSource);
       SetupAnnotationController(_segmentationMaskAnnotationController, imageSource);
       _segmentationMaskAnnotationController.InitScreen(imageSource.textureWidth, imageSource.textureHeight);
       SetupAnnotationController(_poseRoiAnnotationController, imageSource);
-    }
 
-    protected override void AddTextureFrameToInputStream(TextureFrame textureFrame)
-    {
-      graphRunner.AddTextureFrameToInputStream(textureFrame);
-    }
+      graphRunner.StartRun(imageSource);
 
-    protected override IEnumerator WaitForNextValue()
-    {
-      Detection poseDetection = null;
-      NormalizedLandmarkList faceLandmarks = null;
-      NormalizedLandmarkList poseLandmarks = null;
-      NormalizedLandmarkList leftHandLandmarks = null;
-      NormalizedLandmarkList rightHandLandmarks = null;
-      LandmarkList poseWorldLandmarks = null;
-      ImageFrame segmentationMask = null;
-      NormalizedRect poseRoi = null;
+      AsyncGPUReadbackRequest req = default;
+      var waitUntilReqDone = new WaitUntil(() => req.done);
 
-      if (runningMode == RunningMode.Sync)
+      // NOTE: we can share the GL context of the render thread with MediaPipe (for now, only on Android)
+      var canUseGpuImage = graphRunner.configType == GraphRunner.ConfigType.OpenGLES && GpuManager.GpuResources != null;
+      using var glContext = canUseGpuImage ? GpuManager.GetGlContext() : null;
+
+      while (true)
       {
-        var _ = graphRunner.TryGetNext(out poseDetection, out poseLandmarks, out faceLandmarks, out leftHandLandmarks, out rightHandLandmarks, out poseWorldLandmarks, out segmentationMask, out poseRoi, true);
+        if (isPaused)
+        {
+          yield return new WaitWhile(() => isPaused);
+        }
+
+        if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
+        {
+          yield return new WaitForEndOfFrame();
+          continue;
+        }
+
+        // Copy current image to TextureFrame
+        if (canUseGpuImage)
+        {
+          yield return new WaitForEndOfFrame();
+          textureFrame.ReadTextureOnGPU(imageSource.GetCurrentTexture());
+        }
+        else
+        {
+          req = textureFrame.ReadTextureAsync(imageSource.GetCurrentTexture());
+          yield return waitUntilReqDone;
+
+          if (req.hasError)
+          {
+            Debug.LogError($"Failed to read texture from the image source, exiting...");
+            break;
+          }
+        }
+
+        graphRunner.AddTextureFrameToInputStream(textureFrame, glContext);
+
+        if (runningMode.IsSynchronous())
+        {
+          screen.ReadSync(textureFrame);
+
+          var task = graphRunner.WaitNextAsync();
+          yield return new WaitUntil(() => task.IsCompleted);
+
+          var result = task.Result;
+          _poseDetectionAnnotationController.DrawNow(result.poseDetection);
+          _holisticAnnotationController.DrawNow(result.faceLandmarks, result.poseLandmarks, result.leftHandLandmarks, result.rightHandLandmarks);
+          _poseWorldLandmarksAnnotationController.DrawNow(result.poseWorldLandmarks);
+          _segmentationMaskAnnotationController.DrawNow(result.segmentationMask);
+          _poseRoiAnnotationController.DrawNow(result.poseRoi);
+
+          result.segmentationMask?.Dispose();
+        }
       }
-      else if (runningMode == RunningMode.NonBlockingSync)
-      {
-        yield return new WaitUntil(() =>
-          graphRunner.TryGetNext(out poseDetection, out poseLandmarks, out faceLandmarks, out leftHandLandmarks, out rightHandLandmarks, out poseWorldLandmarks, out segmentationMask, out poseRoi, false));
-      }
-
-      _poseDetectionAnnotationController.DrawNow(poseDetection);
-      _holisticAnnotationController.DrawNow(faceLandmarks, poseLandmarks, leftHandLandmarks, rightHandLandmarks);
-      _poseWorldLandmarksAnnotationController.DrawNow(poseWorldLandmarks);
-      _segmentationMaskAnnotationController.DrawNow(segmentationMask);
-      _poseRoiAnnotationController.DrawNow(poseRoi);
     }
 
-    private void OnPoseDetectionOutput(object stream, OutputEventArgs<Detection> eventArgs)
+    private void OnPoseDetectionOutput(object stream, OutputStream<Detection>.OutputEventArgs eventArgs)
     {
-      _poseDetectionAnnotationController.DrawLater(eventArgs.value);
+      var packet = eventArgs.packet;
+      var value = packet == null ? default : packet.Get(Detection.Parser);
+      _poseDetectionAnnotationController.DrawLater(value);
     }
 
-    private void OnFaceLandmarksOutput(object stream, OutputEventArgs<NormalizedLandmarkList> eventArgs)
+    private void OnFaceLandmarksOutput(object stream, OutputStream<NormalizedLandmarkList>.OutputEventArgs eventArgs)
     {
-      _holisticAnnotationController.DrawFaceLandmarkListLater(eventArgs.value);
+      var packet = eventArgs.packet;
+      var value = packet == null ? default : packet.Get(NormalizedLandmarkList.Parser);
+      _holisticAnnotationController.DrawFaceLandmarkListLater(value);
     }
 
-    private void OnPoseLandmarksOutput(object stream, OutputEventArgs<NormalizedLandmarkList> eventArgs)
+    private void OnPoseLandmarksOutput(object stream, OutputStream<NormalizedLandmarkList>.OutputEventArgs eventArgs)
     {
-      _holisticAnnotationController.DrawPoseLandmarkListLater(eventArgs.value);
+      var packet = eventArgs.packet;
+      var value = packet == null ? default : packet.Get(NormalizedLandmarkList.Parser);
+      _holisticAnnotationController.DrawPoseLandmarkListLater(value);
     }
 
-    private void OnLeftHandLandmarksOutput(object stream, OutputEventArgs<NormalizedLandmarkList> eventArgs)
+    private void OnLeftHandLandmarksOutput(object stream, OutputStream<NormalizedLandmarkList>.OutputEventArgs eventArgs)
     {
-      _holisticAnnotationController.DrawLeftHandLandmarkListLater(eventArgs.value);
+      var packet = eventArgs.packet;
+      var value = packet == null ? default : packet.Get(NormalizedLandmarkList.Parser);
+      _holisticAnnotationController.DrawLeftHandLandmarkListLater(value);
     }
 
-    private void OnRightHandLandmarksOutput(object stream, OutputEventArgs<NormalizedLandmarkList> eventArgs)
+    private void OnRightHandLandmarksOutput(object stream, OutputStream<NormalizedLandmarkList>.OutputEventArgs eventArgs)
     {
-      _holisticAnnotationController.DrawRightHandLandmarkListLater(eventArgs.value);
+      var packet = eventArgs.packet;
+      var value = packet == null ? default : packet.Get(NormalizedLandmarkList.Parser);
+      _holisticAnnotationController.DrawRightHandLandmarkListLater(value);
     }
 
-    private void OnPoseWorldLandmarksOutput(object stream, OutputEventArgs<LandmarkList> eventArgs)
+    private void OnPoseWorldLandmarksOutput(object stream, OutputStream<LandmarkList>.OutputEventArgs eventArgs)
     {
-      _poseWorldLandmarksAnnotationController.DrawLater(eventArgs.value);
+      var packet = eventArgs.packet;
+      var value = packet == null ? default : packet.Get(LandmarkList.Parser);
+      _poseWorldLandmarksAnnotationController.DrawLater(value);
     }
 
-    private void OnSegmentationMaskOutput(object stream, OutputEventArgs<ImageFrame> eventArgs)
+    private void OnSegmentationMaskOutput(object stream, OutputStream<ImageFrame>.OutputEventArgs eventArgs)
     {
-      _segmentationMaskAnnotationController.DrawLater(eventArgs.value);
+      var packet = eventArgs.packet;
+      var value = packet == null ? default : packet.Get();
+      _segmentationMaskAnnotationController.DrawLater(value);
+      value?.Dispose();
     }
 
-    private void OnPoseRoiOutput(object stream, OutputEventArgs<NormalizedRect> eventArgs)
+    private void OnPoseRoiOutput(object stream, OutputStream<NormalizedRect>.OutputEventArgs eventArgs)
     {
-      _poseRoiAnnotationController.DrawLater(eventArgs.value);
+      var packet = eventArgs.packet;
+      var value = packet == null ? default : packet.Get(NormalizedRect.Parser);
+      _poseRoiAnnotationController.DrawLater(value);
     }
   }
 }

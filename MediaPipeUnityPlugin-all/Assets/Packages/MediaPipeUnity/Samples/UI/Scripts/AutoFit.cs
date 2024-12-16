@@ -21,11 +21,6 @@ namespace Mediapipe.Unity
 
     [SerializeField] private FitMode _fitMode;
 
-    private void Start()
-    {
-      transform.eulerAngles = new Vector3(transform.rotation.x, 180.0f, transform.rotation.z);
-    }
-
     private void LateUpdate()
     {
       var rectTransform = GetComponent<RectTransform>();
@@ -59,8 +54,8 @@ namespace Mediapipe.Unity
       var center = rect.center;
       var topLeftRel = new Vector2(rect.xMin - center.x, rect.yMin - center.y);
       var topRightRel = new Vector2(rect.xMax - center.x, rect.yMin - center.y);
-      var rotatedTopLeftRel = rectTransform.rotation * topLeftRel;
-      var rotatedTopRightRel = rectTransform.rotation * topRightRel;
+      var rotatedTopLeftRel = rectTransform.localRotation * topLeftRel;
+      var rotatedTopRightRel = rectTransform.localRotation * topRightRel;
       var wMax = Mathf.Max(Mathf.Abs(rotatedTopLeftRel.x), Mathf.Abs(rotatedTopRightRel.x));
       var hMax = Mathf.Max(Mathf.Abs(rotatedTopLeftRel.y), Mathf.Abs(rotatedTopRightRel.y));
       return (2 * wMax, 2 * hMax);

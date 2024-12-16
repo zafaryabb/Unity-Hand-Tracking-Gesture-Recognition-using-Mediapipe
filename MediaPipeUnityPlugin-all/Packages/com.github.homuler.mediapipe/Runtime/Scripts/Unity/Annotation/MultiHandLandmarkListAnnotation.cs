@@ -7,18 +7,18 @@
 using System.Collections.Generic;
 using UnityEngine;
 
+using mptcc = Mediapipe.Tasks.Components.Containers;
+
 namespace Mediapipe.Unity
 {
 #pragma warning disable IDE0065
   using Color = UnityEngine.Color;
 #pragma warning restore IDE0065
 
-
-
   public sealed class MultiHandLandmarkListAnnotation : ListAnnotation<HandLandmarkListAnnotation>
   {
-    [SerializeField] private Color _leftLandmarkColor;
-    [SerializeField] private Color _rightLandmarkColor;
+    [SerializeField] private Color _leftLandmarkColor = Color.green;
+    [SerializeField] private Color _rightLandmarkColor = Color.green;
     [SerializeField] private float _landmarkRadius = 15.0f;
     [SerializeField] private Color _connectionColor = Color.white;
     [SerializeField, Range(0, 1)] private float _connectionWidth = 1.0f;
@@ -67,7 +67,7 @@ namespace Mediapipe.Unity
       ApplyConnectionWidth(_connectionWidth);
     }
 
-    public void SetHandedness(IList<ClassificationList> handedness)
+    public void SetHandedness(IReadOnlyList<ClassificationList> handedness)
     {
       var count = handedness == null ? 0 : handedness.Count;
       for (var i = 0; i < Mathf.Min(count, children.Count); i++)
@@ -76,11 +76,35 @@ namespace Mediapipe.Unity
       }
       for (var i = count; i < children.Count; i++)
       {
-        children[i].SetHandedness((IList<Classification>)null);
+        children[i].SetHandedness((IReadOnlyList<Classification>)null);
       }
     }
 
-    public void Draw(IList<NormalizedLandmarkList> targets, bool visualizeZ = false)
+    public void SetHandedness(IReadOnlyList<mptcc.Classifications> handedness)
+    {
+      var count = handedness == null ? 0 : handedness.Count;
+      for (var i = 0; i < Mathf.Min(count, children.Count); i++)
+      {
+        children[i].SetHandedness(handedness[i]);
+      }
+      for (var i = count; i < children.Count; i++)
+      {
+        children[i].SetHandedness((IReadOnlyList<mptcc.Category>)null);
+      }
+    }
+
+    public void Draw(IReadOnlyList<NormalizedLandmarkList> targets, bool visualizeZ = false)
+    {
+      if (ActivateFor(targets))
+      {
+        CallActionForAll(targets, (annotation, target) =>
+        {
+          if (annotation != null) { annotation.Draw(target, visualizeZ); }
+        });
+      }
+    }
+
+    public void Draw(IReadOnlyList<mptcc.NormalizedLandmarks> targets, bool visualizeZ = false)
     {
       if (ActivateFor(targets))
       {

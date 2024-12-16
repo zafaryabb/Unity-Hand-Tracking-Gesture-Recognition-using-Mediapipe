@@ -8,42 +8,37 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 
-namespace Mediapipe.Unity.MediaPipeVideo
+namespace Mediapipe.Unity.Sample.MediaPipeVideo
 {
   public class MediaPipeVideoGraph : GraphRunner
   {
     public int maxNumHands = 2;
 
-    public event EventHandler<OutputEventArgs<ImageFrame>> OnOutput
-    {
-      add => _outputVideoStream.AddListener(value);
-      remove => _outputVideoStream.RemoveListener(value);
-    }
-
     private const string _InputStreamName = "input_video";
 
-    private GpuBufferPacket _outputGpuBufferPacket;
+    private Packet<GpuBuffer> _outputGpuBufferPacket;
     private string _destinationBufferName;
-    private TextureFrame _destinationTexture;
+    private Experimental.TextureFrame _destinationTexture;
 
     private const string _OutputVideoStreamName = "output_video";
-    private OutputStream<ImageFramePacket, ImageFrame> _outputVideoStream;
+    private OutputStream<ImageFrame> _outputVideoStream;
 
     public override void StartRun(ImageSource imageSource)
     {
       if (configType != ConfigType.OpenGLES)
       {
-        _outputVideoStream.StartPolling().AssertOk();
+        _outputVideoStream.StartPolling();
       }
       StartRun(BuildSidePacket(imageSource));
     }
 
     public override void Stop()
     {
-      _outputVideoStream?.Close();
-      _outputVideoStream = null;
       base.Stop();
+      _outputVideoStream?.Dispose();
+      _outputVideoStream = null;
     }
 
 
@@ -56,27 +51,34 @@ namespace Mediapipe.Unity.MediaPipeVideo
       return base.Initialize(runningMode);
     }
 
-    public void SetupOutputPacket(TextureFrame textureFrame)
+    public void SetupOutputPacket(Experimental.TextureFrame textureFrame, GlContext glContext)
     {
       if (configType != ConfigType.OpenGLES)
       {
         throw new InvalidOperationException("This method is only supported for OpenGL ES");
       }
       _destinationTexture = textureFrame;
-      _outputGpuBufferPacket = new GpuBufferPacket(_destinationTexture.BuildGpuBuffer(GpuManager.GlCalculatorHelper.GetGlContext()));
+      _outputGpuBufferPacket = Packet.CreateGpuBuffer(_destinationTexture.BuildGpuBuffer(glContext));
     }
 
-    public void AddTextureFrameToInputStream(TextureFrame textureFrame)
+    public void AddTextureFrameToInputStream(Experimental.TextureFrame textureFrame, GlContext glContext = null)
     {
-      AddTextureFrameToInputStream(_InputStreamName, textureFrame);
+      AddTextureFrameToInputStream(_InputStreamName, textureFrame, glContext);
     }
 
-    public bool TryGetNext(out ImageFrame outputVideo, bool allowBlock = true)
+    public async Task<ImageFrame> WaitNextAsync()
     {
-      return TryGetNext(_outputVideoStream, out outputVideo, allowBlock, GetCurrentTimestampMicrosec());
+      var result = await _outputVideoStream.WaitNextAsync();
+      AssertResult(result);
+
+      _ = TryGetValue(result.packet, out var outputVideo, (packet) =>
+      {
+        return packet.Get();
+      });
+      return outputVideo;
     }
 
-    protected override Status ConfigureCalculatorGraph(CalculatorGraphConfig config)
+    protected override void ConfigureCalculatorGraph(CalculatorGraphConfig config)
     {
       if (configType == ConfigType.OpenGLES)
       {
@@ -86,17 +88,9 @@ namespace Mediapipe.Unity.MediaPipeVideo
         sinkNode.InputSidePacket.Add($"DESTINATION:{_destinationBufferName}");
       }
 
-      if (runningMode == RunningMode.NonBlockingSync)
-      {
-        _outputVideoStream = new OutputStream<ImageFramePacket, ImageFrame>(
-            calculatorGraph, _OutputVideoStreamName, config.AddPacketPresenceCalculator(_OutputVideoStreamName), timeoutMicrosec);
-      }
-      else
-      {
-        _outputVideoStream = new OutputStream<ImageFramePacket, ImageFrame>(calculatorGraph, _OutputVideoStreamName, true, timeoutMicrosec);
-      }
+      _outputVideoStream = new OutputStream<ImageFrame>(calculatorGraph, _OutputVideoStreamName, true);
 
-      return calculatorGraph.Initialize(config);
+      calculatorGraph.Initialize(config);
     }
 
     protected override IList<WaitForResult> RequestDependentAssets()
@@ -109,13 +103,13 @@ namespace Mediapipe.Unity.MediaPipeVideo
       };
     }
 
-    private SidePacket BuildSidePacket(ImageSource imageSource)
+    private PacketMap BuildSidePacket(ImageSource imageSource)
     {
-      var sidePacket = new SidePacket();
+      var sidePacket = new PacketMap();
 
       SetImageTransformationOptions(sidePacket, imageSource, true);
-      sidePacket.Emplace("output_rotation", new IntPacket((int)imageSource.rotation));
-      sidePacket.Emplace("num_hands", new IntPacket(maxNumHands));
+      sidePacket.Emplace("output_rotation", Packet.CreateInt((int)imageSource.rotation));
+      sidePacket.Emplace("num_hands", Packet.CreateInt(maxNumHands));
 
       if (configType == ConfigType.OpenGLES)
       {

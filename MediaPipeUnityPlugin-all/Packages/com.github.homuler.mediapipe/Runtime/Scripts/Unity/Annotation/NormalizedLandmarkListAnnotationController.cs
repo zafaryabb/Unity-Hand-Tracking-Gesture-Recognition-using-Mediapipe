@@ -50,7 +50,12 @@ namespace Mediapipe.Unity
     protected override void SyncNow()
     {
       isStale = false;
-      annotation.Draw(_currentTarget, _visualizeZ);
+
+      IReadOnlyList<Vector3> dummyPoints = new List<Vector3> {
+        new Vector3(0, 0, 0),
+        new Vector3(1, 1, 1),
+    };
+      annotation.Draw(_currentTarget, dummyPoints);
     }
 
     private IList<NormalizedLandmark> FlattenNormalizedLandmarkLists(IList<NormalizedLandmarkList> landmarkLists)
